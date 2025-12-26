@@ -16,7 +16,7 @@ import { submitToGoogleForm } from '../services/api';
 import { FORM_CONFIG } from '../config/constants';
 
 export default function Capture({ onCancel }) {
-  const [step, setStep] = useState('select'); // select, processing, form, success, error, format_warning
+  const [step, setStep] = useState('select');
   const [image, setImage] = useState(null);
   const [formData, setFormData] = useState({
     amount: '',
@@ -31,7 +31,7 @@ export default function Capture({ onCancel }) {
   const [errorMsg, setErrorMsg] = useState('');
   const [errorType, setErrorType] = useState(null); // 'permission', 'generic', 'prep'
 
-  // -------- Helpers --------
+  // ---------- Helpers ----------
 
   const normalizeImage = (base64) => {
     return new Promise((resolve) => {
@@ -127,7 +127,7 @@ export default function Capture({ onCancel }) {
     }
   };
 
-  // -------- Handlers --------
+  // ---------- Handlers ----------
 
   const handleCameraCapture = async () => {
     if (!(await checkAndRequestPermissions('camera'))) return;
@@ -139,11 +139,13 @@ export default function Capture({ onCancel }) {
         source: CameraSource.Camera,
       });
 
-      if (!photo.path) {
+      console.log('Camera photo:', photo);
+      const path = photo.path || photo.webPath; // fallback
+      if (!path) {
         throw new Error('Unable to get image path from camera.');
       }
 
-      await startProcessing(photo.path);
+      await startProcessing(path);
     } catch (err) {
       if (err.message !== 'User cancelled photos app') {
         setErrorMsg('Unable to prepare image for analysis.');
@@ -163,11 +165,13 @@ export default function Capture({ onCancel }) {
         source: CameraSource.Photos,
       });
 
-      if (!photo.path) {
+      console.log('Gallery photo:', photo);
+      const path = photo.path || photo.webPath;
+      if (!path) {
         throw new Error('Unable to get image path from gallery.');
       }
 
-      await startProcessing(photo.path);
+      await startProcessing(path);
     } catch (err) {
       if (err.message !== 'User cancelled photos app') {
         setErrorMsg('Unable to prepare image for analysis.');
@@ -202,7 +206,7 @@ export default function Capture({ onCancel }) {
       const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
       await startProcessing(dataUrl);
     } catch (err) {
-      console.error('PDF OCR error:', err);
+      console.error('PDF error:', err);
       setErrorMsg('PDF not supported or corrupted.');
       setErrorType('generic');
       setStep('error');
@@ -222,7 +226,7 @@ export default function Capture({ onCancel }) {
     }
   };
 
-  // -------- Render --------
+  // ---------- Render ----------
 
   if (step === 'select') {
     return (
@@ -366,7 +370,7 @@ export default function Capture({ onCancel }) {
     );
   }
 
-  // step === 'form'
+  // form
   return (
     <div className="h-full flex flex-col bg-surface overflow-hidden">
       <Header onCancel={onCancel} title="Confirm Expense" />
