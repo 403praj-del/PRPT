@@ -1,8 +1,11 @@
-
 import React, { useState } from 'react';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
-import { analyzeImage } from './utils/ocr'; // Adjust path if needed
+
+// ----------------------------------------------------
+// ✅ FIXED IMPORT: Uses '../' to go up to src/utils
+// ----------------------------------------------------
+import { analyzeImage } from '../utils/ocr'; 
 
 const CaptureReceipt = () => {
   const [loading, setLoading] = useState(false);
@@ -15,28 +18,25 @@ const CaptureReceipt = () => {
     setReceiptData(null);
 
     try {
-      // 1. Open Camera / Gallery
       const image = await Camera.getPhoto({
         quality: 90,
-        allowEditing: false, // Set true if you want cropping
-        resultType: CameraResultType.Uri, // ⚠️ CRITICAL: Must be Uri for OCR
-        source: CameraSource.Prompt, // Allows user to choose Camera or Gallery
+        allowEditing: false, 
+        resultType: CameraResultType.Uri, 
+        source: CameraSource.Prompt, 
         saveToGallery: false
       });
 
-      // 2. Set Preview immediately (for UI)
       setPreviewImage(image.webPath);
       setLoading(true);
 
-      // 3. Prepare Path for OCR
       // Capacitor 3+: image.path is the native file path
-      // If path is undefined (e.g. web), we cannot use the Native OCR plugin
       if (!image.path && Capacitor.isNativePlatform()) {
         throw new Error('Unable to resolve native file path. Try a different image.');
       }
 
-      // 4. Run Analysis
       console.log('Sending path to OCR:', image.path);
+      
+      // Pass the native path to the OCR utility
       const data = await analyzeImage(image.path);
       
       setReceiptData(data);
@@ -52,7 +52,7 @@ const CaptureReceipt = () => {
       } else if (error.message === 'file_not_found') {
         uiMessage = 'Could not read the image file. Please try again.';
       } else if (error.message.includes('cancelled')) {
-        uiMessage = ''; // User cancelled, no error needed
+        uiMessage = ''; 
       }
 
       if (uiMessage) setErrorMsg(uiMessage);
@@ -66,14 +66,12 @@ const CaptureReceipt = () => {
     <div style={{ padding: '20px', textAlign: 'center' }}>
       <h2>Scan Receipt</h2>
       
-      {/* --- Error Banner --- */}
       {errorMsg && (
         <div style={{ background: '#ffcccc', color: '#cc0000', padding: '10px', marginBottom: '15px', borderRadius: '8px' }}>
           {errorMsg}
         </div>
       )}
 
-      {/* --- Image Preview --- */}
       {previewImage && (
         <img 
           src={previewImage} 
@@ -82,7 +80,6 @@ const CaptureReceipt = () => {
         />
       )}
 
-      {/* --- Action Button --- */}
       <button 
         onClick={takePicture}
         disabled={loading}
@@ -99,7 +96,6 @@ const CaptureReceipt = () => {
         {loading ? 'Analyzing...' : 'Take Photo / Upload'}
       </button>
 
-      {/* --- Results Display --- */}
       {receiptData && (
         <div style={{ marginTop: '20px', textAlign: 'left', background: '#f5f5f5', padding: '15px', borderRadius: '10px' }}>
           <h3>Results:</h3>
@@ -114,3 +110,4 @@ const CaptureReceipt = () => {
 };
 
 export default CaptureReceipt;
+
