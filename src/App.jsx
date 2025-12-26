@@ -13,7 +13,9 @@ function App() {
     const initPermissions = async () => {
       try {
         const status = await Camera.checkPermissions();
+        // Comprehensive check for Camera and Photos
         if (status.camera !== 'granted' || status.photos !== 'granted') {
+          console.log("Requesting permissions on launch...");
           await Camera.requestPermissions({ permissions: ['camera', 'photos'] });
         }
       } catch (err) {
