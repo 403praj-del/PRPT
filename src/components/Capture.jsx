@@ -1,113 +1,545 @@
 import React, { useState } from 'react';
+import {
+  X,
+  Upload,
+  Camera as CameraIcon,
+  Check,
+  Loader2,
+  Sparkles,
+  AlertCircle,
+  FileText,
+  Settings as SettingsIcon,
+} from 'lucide-react';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
-import { Capacitor } from '@capacitor/core';
+import { analyzeImage } from '../services/ocr';
+import { submitToGoogleForm } from '../services/api';
+import { FORM_CONFIG } from '../config/constants';
 
-// ----------------------------------------------------
-// ✅ FIXED IMPORT: Uses '../' to go up to src/utils
-// ----------------------------------------------------
-import { analyzeImage } from '../utils/ocr'; 
+type Step =
+  | 'select'
+  | 'processing'
+  | 'form'
+  | 'success'
+  | 'error'
+  | 'format_warning';
 
-const CaptureReceipt = () => {
-  const [loading, setLoading] = useState(false);
-  const [receiptData, setReceiptData] = useState(null);
+interface CaptureProps {
+  onCancel: () => void;
+}
+
+export default function Capture({ onCancel }: CaptureProps) {
+  const [step, setStep] = useState<Step>('select');
+  const [image, setImage] = useState<string | null>(null);
+  const [formData, setFormData] = useState({
+    amount: '',
+    category: FORM_CONFIG.categories[0],
+    method: FORM_CONFIG.paymentMethods[0],
+    date: new Date().toISOString().split('T')[0],
+    merchant: '',
+    invoice_number: '',
+  });
+  const [analysisData, setAnalysisData] = useState<any>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [previewImage, setPreviewImage] = useState(null);
+  const [errorType, setErrorType] = useState<'permission' | 'generic' | 'prep' | null>(null);
 
-  const takePicture = async () => {
-    setErrorMsg('');
-    setReceiptData(null);
+  // -------- Helpers --------
 
+  // Only used for data URLs (PDF / web preview).
+  const normalizeImage = (base64: string): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d')!;
+
+        const MAX_WIDTH = 1280;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > MAX_WIDTH) {
+          height *= MAX_WIDTH / width;
+          width = MAX_WIDTH;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d')!;
+        tempCtx.filter = 'brightness(1.1) contrast(1.15)';
+        tempCtx.drawImage(canvas, 0, 0);
+
+        resolve(tempCanvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = () => resolve(base64);
+      img.src = base64;
+    });
+  };
+
+  const checkAndRequestPermissions = async (type: 'camera' | 'photos') => {
     try {
-      const image = await Camera.getPhoto({
-        quality: 90,
-        allowEditing: false, 
-        resultType: CameraResultType.Uri, 
-        source: CameraSource.Prompt, 
-        saveToGallery: false
-      });
-
-      setPreviewImage(image.webPath);
-      setLoading(true);
-
-      // Capacitor 3+: image.path is the native file path
-      if (!image.path && Capacitor.isNativePlatform()) {
-        throw new Error('Unable to resolve native file path. Try a different image.');
+      const status = await Camera.checkPermissions();
+      if (type === 'camera' && status.camera !== 'granted') {
+        const req = await Camera.requestPermissions({ permissions: ['camera'] });
+        if (req.camera !== 'granted') throw new Error('permission');
+      } else if (type === 'photos' && status.photos !== 'granted') {
+        const req = await Camera.requestPermissions({ permissions: ['photos'] });
+        if (req.photos !== 'granted') throw new Error('permission');
       }
-
-      console.log('Sending path to OCR:', image.path);
-      
-      // Pass the native path to the OCR utility
-      const data = await analyzeImage(image.path);
-      
-      setReceiptData(data);
-      console.log('Analysis Complete:', data);
-
-    } catch (error) {
-      console.error('Capture Flow Error:', error);
-      
-      let uiMessage = 'Failed to analyze receipt.';
-      
-      if (error.message === 'permission') {
-        uiMessage = 'Camera/Storage permission denied. Please enable them in settings.';
-      } else if (error.message === 'file_not_found') {
-        uiMessage = 'Could not read the image file. Please try again.';
-      } else if (error.message.includes('cancelled')) {
-        uiMessage = ''; 
-      }
-
-      if (uiMessage) setErrorMsg(uiMessage);
-      
-    } finally {
-      setLoading(false);
+      return true;
+    } catch {
+      setErrorMsg(
+        'Permission Required: The app cannot access the camera or files. Please enable access in settings.',
+      );
+      setErrorType('permission');
+      setStep('error');
+      return false;
     }
   };
 
+  const startProcessing = async (src: string) => {
+    setStep('processing');
+    setErrorMsg('');
+    try {
+      let preview = src;
+
+      // For native file paths we can’t preview directly; for data URLs normalize.
+      if (src.startsWith('data:')) {
+        preview = await normalizeImage(src);
+      }
+
+      setImage(preview);
+
+      const result = await analyzeImage(src);
+      setAnalysisData(result);
+
+      setFormData((prev) => ({
+        ...prev,
+        amount: result.amount || '',
+        category: result.category || FORM_CONFIG.categories[0],
+        method: result.payment_method || FORM_CONFIG.paymentMethods[0],
+        date: result.date || new Date().toISOString().split('T')[0],
+        merchant: result.merchant || '',
+        invoice_number: result.invoice_number || '',
+      }));
+
+      if (!result.hasFields) {
+        setStep('format_warning');
+      } else {
+        setStep('form');
+      }
+    } catch (err: any) {
+      console.error('Processing error:', err);
+      const msg = err?.message || 'Failed to analyze image.';
+      setErrorMsg(msg);
+      setErrorType(msg.includes('prepare') ? 'prep' : 'generic');
+      setStep('error');
+    }
+  };
+
+  // -------- Handlers --------
+
+  const handleCameraCapture = async () => {
+    if (!(await checkAndRequestPermissions('camera'))) return;
+    try {
+      const photo = await Camera.getPhoto({
+        quality: 90,
+        allowEditing: false,
+        resultType: CameraResultType.Uri,
+        source: CameraSource.Camera,
+      });
+
+      if (!photo.path) {
+        throw new Error('Unable to get image path from camera.');
+      }
+
+      await startProcessing(photo.path);
+    } catch (err: any) {
+      if (err?.message !== 'User cancelled photos app') {
+        setErrorMsg('Unable to prepare image for analysis.');
+        setErrorType('generic');
+        setStep('error');
+      }
+    }
+  };
+
+  const handleGalleryUpload = async () => {
+    if (!(await checkAndRequestPermissions('photos'))) return;
+    try {
+      const photo = await Camera.getPhoto({
+        quality: 90,
+        allowEditing: false,
+        resultType: CameraResultType.Uri,
+        source: CameraSource.Photos,
+      });
+
+      if (!photo.path) {
+        throw new Error('Unable to get image path from gallery.');
+      }
+
+      await startProcessing(photo.path);
+    } catch (err: any) {
+      if (err?.message !== 'User cancelled photos app') {
+        setErrorMsg('Unable to prepare image for analysis.');
+        setErrorType('generic');
+        setStep('error');
+      }
+    }
+  };
+
+  const handlePDFUploadChange = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setStep('processing');
+    setErrorMsg('');
+    try {
+      const pdfjs = await import('pdfjs-dist');
+      pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+      const page = await pdf.getPage(1);
+
+      const viewport = page.getViewport({ scale: 2.5 });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d')!;
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+
+      await page.render({ canvasContext: context, viewport }).promise;
+
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      await startProcessing(dataUrl);
+    } catch (err) {
+      console.error('PDF OCR error:', err);
+      setErrorMsg('PDF not supported or corrupted.');
+      setErrorType('generic');
+      setStep('error');
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    const success = await submitToGoogleForm(formData);
+    setIsSubmitting(false);
+    if (success) {
+      setStep('success');
+      setTimeout(() => onCancel(), 1500);
+    } else {
+      alert('Submission error! Check internet.');
+    }
+  };
+
+  // -------- Render --------
+
+  if (step === 'select') {
+    return (
+      <div className="h-full flex flex-col bg-surface overflow-hidden">
+        <Header onCancel={onCancel} title="Add Payment" />
+        <div className="flex-1 flex flex-col p-6 items-center justify-center gap-6">
+          <button
+            onClick={handleCameraCapture}
+            className="w-full h-52 rounded-3xl bg-surface border-4 border-dashed border-border flex flex-col items-center justify-center gap-4 hover:border-primary hover:bg-primary/5 transition-all group"
+          >
+            <div className="w-16 h-16 rounded-full bg-primary/10 text-primary flex items-center justify-center group-hover:scale-110 transition-transform">
+              <CameraIcon size={32} />
+            </div>
+            <div className="text-center">
+              <span className="font-bold text-lg block">Scan Receipt</span>
+              <p className="text-xs text-text-muted mt-1">
+                Capture with device camera
+              </p>
+            </div>
+          </button>
+
+          <div className="grid grid-cols-2 gap-4 w-full">
+            <button
+              onClick={handleGalleryUpload}
+              className="h-36 rounded-2xl bg-surface border-2 border-dashed border-border flex flex-col items-center justify-center gap-2"
+            >
+              <Upload size={24} className="text-secondary" />
+              <span className="font-bold text-xs uppercase text-text">
+                Photos
+              </span>
+            </button>
+
+            <div className="relative">
+              <input
+                type="file"
+                accept="application/pdf"
+                className="absolute inset-0 opacity-0 cursor-pointer z-10"
+                onChange={handlePDFUploadChange}
+              />
+              <button className="w-full h-36 rounded-2xl bg-surface border-2 border-dashed border-border flex flex-col items-center justify-center gap-2">
+                <FileText size={24} className="text-accent" />
+                <span className="font-bold text-xs uppercase text-text">
+                  PDF Document
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'processing') {
+    return (
+      <div className="h-full flex flex-col items-center justify-center bg-surface p-12 text-center space-y-6">
+        <Loader2 size={48} className="text-primary animate-spin" />
+        <div>
+          <h3 className="text-xl font-black">Normalizing Input...</h3>
+          <p className="text-sm text-text-muted mt-2">
+            Preparing high-res OCR scan
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'format_warning') {
+    return (
+      <div className="h-full flex flex-col items-center justify-center bg-surface p-8 text-center space-y-6">
+        <div className="w-20 h-20 bg-amber-500/10 text-amber-500 rounded-full flex items-center justify-center">
+          <AlertCircle size={40} />
+        </div>
+        <div className="space-y-2">
+          <h3 className="text-2xl font-black text-amber-600">
+            Format Unrecognized
+          </h3>
+          <p className="text-text-muted">
+            Text detected, but receipt format not recognized. Please fill in
+            details manually.
+          </p>
+        </div>
+        <button
+          onClick={() => setStep('form')}
+          className="w-full bg-primary text-white font-black py-4 rounded-2xl shadow-xl shadow-primary/20 active:scale-95 transition-all text-xl"
+        >
+          Fill Manually
+        </button>
+        <button
+          onClick={() => setStep('select')}
+          className="text-xs font-bold uppercase text-text-muted border-b border-border"
+        >
+          Try Another Image
+        </button>
+      </div>
+    );
+  }
+
+  if (step === 'error') {
+    return (
+      <div className="h-full flex flex-col items-center justify-center bg-surface p-8 text-center space-y-6">
+        <div className="w-20 h-20 bg-red-500/10 text-red-500 rounded-full flex items-center justify-center">
+          <AlertCircle size={40} />
+        </div>
+        <h3 className="text-2xl font-black">
+          {errorType === 'permission' ? 'Access Denied' : 'OCR Error'}
+        </h3>
+        <p className="text-text-muted leading-relaxed">{errorMsg}</p>
+        <div className="w-full space-y-3">
+          {errorType === 'permission' && (
+            <button
+              onClick={() =>
+                alert(
+                  'Open App Info > Permissions > Allow Camera/Storage',
+                )
+              }
+              className="w-full bg-primary text-white font-black py-4 rounded-2xl flex items-center justify-center gap-2"
+            >
+              <SettingsIcon size={20} /> Open Settings
+            </button>
+          )}
+          <button
+            onClick={() => setStep('select')}
+            className="w-full bg-background border-2 border-border text-text font-bold py-4 rounded-2xl"
+          >
+            Try Again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'success') {
+    return (
+      <div className="h-full flex flex-col items-center justify-center bg-surface p-12 text-center space-y-4">
+        <div className="w-24 h-24 bg-secondary/20 text-secondary rounded-full flex items-center justify-center animate-bounce">
+          <Check size={48} />
+        </div>
+        <h2 className="text-3xl font-black">RECORDED!</h2>
+        <p className="text-text-muted">Data synced to Google Sheet.</p>
+      </div>
+    );
+  }
+
+  // step === 'form'
   return (
-    <div style={{ padding: '20px', textAlign: 'center' }}>
-      <h2>Scan Receipt</h2>
-      
-      {errorMsg && (
-        <div style={{ background: '#ffcccc', color: '#cc0000', padding: '10px', marginBottom: '15px', borderRadius: '8px' }}>
-          {errorMsg}
-        </div>
-      )}
+    <div className="h-full flex flex-col bg-surface overflow-hidden">
+      <Header onCancel={onCancel} title="Confirm Expense" />
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-28">
+        {image && image.startsWith('data:') && (
+          <img
+            src={image}
+            className="h-48 w-full object-cover rounded-2xl border-2 border-border"
+            alt="Scan"
+          />
+        )}
 
-      {previewImage && (
-        <img 
-          src={previewImage} 
-          alt="Receipt Preview" 
-          style={{ width: '100%', maxHeight: '300px', objectFit: 'contain', borderRadius: '10px', marginBottom: '20px' }} 
-        />
-      )}
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">
+              Amount
+            </label>
+            <div className="relative">
+              <span className="absolute left-5 top-1/2 -translate-y-1/2 text-3xl font-black text-text-muted">
+                ₹
+              </span>
+              <input
+                type="text"
+                value={formData.amount}
+                onChange={(e) =>
+                  setFormData({ ...formData, amount: e.target.value })
+                }
+                placeholder="0.00"
+                className="w-full bg-background border-2 border-border rounded-2xl pl-12 pr-4 py-5 text-4xl font-black focus:border-primary transition-all shadow-sm"
+                required
+              />
+            </div>
+          </div>
 
-      <button 
-        onClick={takePicture}
-        disabled={loading}
-        style={{
-          padding: '15px 30px',
-          fontSize: '18px',
-          background: loading ? '#ccc' : '#6200ea',
-          color: '#fff',
-          border: 'none',
-          borderRadius: '25px',
-          cursor: loading ? 'wait' : 'pointer'
-        }}
-      >
-        {loading ? 'Analyzing...' : 'Take Photo / Upload'}
-      </button>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">
+                Category
+              </label>
+              <select
+                value={formData.category}
+                onChange={(e) =>
+                  setFormData({ ...formData, category: e.target.value })
+                }
+                className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase appearance-none"
+              >
+                {FORM_CONFIG.categories.map((c: string) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">
+                Method
+              </label>
+              <select
+                value={formData.method}
+                onChange={(e) =>
+                  setFormData({ ...formData, method: e.target.value })
+                }
+                className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase appearance-none"
+              >
+                {FORM_CONFIG.paymentMethods.map((m: string) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
 
-      {receiptData && (
-        <div style={{ marginTop: '20px', textAlign: 'left', background: '#f5f5f5', padding: '15px', borderRadius: '10px' }}>
-          <h3>Results:</h3>
-          <p><strong>Merchant:</strong> {receiptData.merchant || 'Unknown'}</p>
-          <p><strong>Date:</strong> {receiptData.date}</p>
-          <p><strong>Amount:</strong> {receiptData.amount ? `₹${receiptData.amount}` : 'Not found'}</p>
-          <p><strong>Category:</strong> {receiptData.category}</p>
-        </div>
-      )}
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">
+              Merchant
+            </label>
+            <input
+              type="text"
+              value={formData.merchant}
+              onChange={(e) =>
+                setFormData({ ...formData, merchant: e.target.value })
+              }
+              placeholder="Vendor Name"
+              className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold shadow-sm"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">
+                Date
+              </label>
+              <input
+                type="date"
+                value={formData.date}
+                onChange={(e) =>
+                  setFormData({ ...formData, date: e.target.value })
+                }
+                className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">
+                Ref #
+              </label>
+              <input
+                type="text"
+                value={formData.invoice_number}
+                onChange={(e) =>
+                  setFormData({
+                    ...formData,
+                    invoice_number: e.target.value,
+                  })
+                }
+                placeholder="Bill ID"
+                className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold text-sm"
+              />
+            </div>
+          </div>
+
+          <div className="fixed bottom-0 left-0 right-0 p-6 bg-surface border-t border-border z-30">
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="w-full bg-primary text-white font-black py-5 rounded-2xl shadow-primary/40 flex items-center justify-center gap-3 active:scale-95 transition-all text-xl uppercase tracking-widest"
+            >
+              {isSubmitting ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <>
+                  Finalize Entry <Sparkles size={20} />
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
-};
+}
 
-export default CaptureReceipt;
+interface HeaderProps {
+  onCancel: () => void;
+  title: string;
+}
 
+const Header = ({ onCancel, title }: HeaderProps) => (
+  <div className="p-5 flex justify-between items-center bg-surface border-b border-border sticky top-0 z-40">
+    <h2 className="font-black text-2xl tracking-tight uppercase tracking-widest">
+      {title}
+    </h2>
+    <button
+      onClick={onCancel}
+      className="p-3 bg-background hover:bg-border rounded-full transition-all active:rotate-90"
+    >
+      <X size={24} />
+    </button>
+  </div>
+);
