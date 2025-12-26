@@ -22,10 +22,19 @@ allprojects {
         google()
         mavenCentral()
     }
-    // Enforce Java 21 across all modules without breaking AGP
+    // Enforce Java 21 Toolchain & Compatibility project-wide
+    // This resolves "invalid source release 21" by ensuring the correct JDK is used for all modules.
     afterEvaluate { project ->
         if (project.hasProperty('android')) {
             project.android {
+                // Ensure compiler uses JDK 21
+                if (project.plugins.hasPlugin('java')) {
+                    project.java {
+                        toolchain {
+                            languageVersion = JavaLanguageVersion.of(21)
+                        }
+                    }
+                }
                 compileOptions {
                     sourceCompatibility JavaVersion.VERSION_21
                     targetCompatibility JavaVersion.VERSION_21
