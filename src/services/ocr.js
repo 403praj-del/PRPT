@@ -6,6 +6,7 @@ import { Ocr } from '@capacitor-community/image-to-text';
 export const analyzeImage = async (imageSrc) => {
     try {
         console.log("OCR starting...");
+        if (!imageSrc) throw new Error("No image data provided.");
 
         // Handle base64 from webcam or image path
         const isBase64 = imageSrc.startsWith('data:');
@@ -15,9 +16,12 @@ export const analyzeImage = async (imageSrc) => {
 
         const { textDetections } = await Ocr.detectText(options);
 
+        if (!textDetections || textDetections.length === 0) {
+            throw new Error("No text detected in the image. Please try a clearer photo.");
+        }
+
         // Join all detected blocks into full text
         const text = textDetections.map(d => d.text).join('\n');
-
         console.log("ML Kit Combined Text:", text);
 
         return {
@@ -31,7 +35,15 @@ export const analyzeImage = async (imageSrc) => {
         };
     } catch (error) {
         console.error("ML Kit OCR Error:", error);
-        throw new Error("Failed to scan image. Ensure the app has camera/storage permissions.");
+
+        // Strategic error messages
+        if (error.message?.includes('permission')) {
+            throw new Error("Storage/Camera permission not granted. Please allow access in settings.");
+        }
+        if (error.message?.includes('No text detected')) {
+            throw error;
+        }
+        throw new Error("Failed to process image. Ensure it's a valid receipt or invoice.");
     }
 };
 
