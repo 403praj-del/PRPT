@@ -36,6 +36,8 @@ jobs:
 
       - name: Build APK
         run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
