@@ -6,7 +6,7 @@ import { Ocr } from '@capacitor-community/image-to-text';
  *   - native file path (CameraResultType.Uri -> photo.path)
  *   - OR data URL (from PDF canvas / web).
  */
-export const analyzeImage = async (imageSrc: string) => {
+export const analyzeImage = async (imageSrc) => {
   if (!imageSrc) {
     throw new Error('Unable to prepare image for analysis (source empty).');
   }
@@ -14,7 +14,7 @@ export const analyzeImage = async (imageSrc: string) => {
   try {
     console.log('OCR starting...');
 
-    let options: any;
+    let options;
 
     if (imageSrc.startsWith('data:')) {
       const base64 = imageSrc.split(',')[1];
@@ -25,7 +25,7 @@ export const analyzeImage = async (imageSrc: string) => {
       }
       options = { base64 };
     } else {
-      // Plugin’s recommended usage is filename only.[web:5]
+      // native file path from Camera plugin
       options = { filename: imageSrc };
     }
 
@@ -37,7 +37,7 @@ export const analyzeImage = async (imageSrc: string) => {
       );
     }
 
-    const fullText = textDetections.map((d: any) => d.text).join('
+    const fullText = textDetections.map((d) => d.text).join('
 ');
     console.log('ML Kit Processed Text:', fullText);
 
@@ -58,10 +58,10 @@ export const analyzeImage = async (imageSrc: string) => {
       payment_method: extractPaymentMethod(fullText),
       hasFields: isLikelyReceipt,
     };
-  } catch (error: any) {
+  } catch (error) {
     console.error('ML Kit OCR Error:', error);
 
-    const msg: string = error?.message || '';
+    const msg = error && error.message ? error.message : '';
 
     if (msg.includes('permission') || msg.includes('access')) {
       throw new Error(
@@ -81,7 +81,7 @@ export const analyzeImage = async (imageSrc: string) => {
 
 // -------- Extraction helpers --------
 
-const extractAmount = (text: string): string => {
+const extractAmount = (text) => {
   const amountRegex =
     /(?:RS|INR|₹|TOTAL|AMOUNT|AMT)s*[:=]?s*(d{1,3}(?:[.,]d{3})*(?:[.,]d{2}))/gi;
   const matches = [...text.matchAll(amountRegex)];
@@ -105,30 +105,30 @@ const extractAmount = (text: string): string => {
   return '';
 };
 
-const extractDate = (text: string): string | null => {
+const extractDate = (text) => {
   const dateRegex =
     /(d{1,2})[/-](d{1,2})[/-](d{2,4})|(d{4})[/-](d{1,2})[/-](d{1,2})/;
   const match = text.match(dateRegex);
 
   if (match) {
-    let y: string, m: string, d: string;
+    let y, m, d;
     if (match[1]) {
       d = match[1].padStart(2, '0');
       m = match[2].padStart(2, '0');
       y = match[3];
       if (y.length === 2) y = '20' + y;
     } else {
-      y = match[4]!;
-      m = match[5]!.padStart(2, '0');
-      d = match[6]!.padStart(2, '0');
+      y = match[4];
+      m = match[5].padStart(2, '0');
+      d = match[6].padStart(2, '0');
     }
     return `${y}-${m}-${d}`;
   }
   return null;
 };
 
-const extractCategory = (text: string): string => {
-  const categories: Record<string, string[]> = {
+const extractCategory = (text) => {
+  const categories = {
     FOOD: [
       'food',
       'restaurant',
@@ -180,7 +180,7 @@ const extractCategory = (text: string): string => {
   return 'Other';
 };
 
-const extractMerchant = (text: string): string => {
+const extractMerchant = (text) => {
   const lines = text
     .split('
 ')
@@ -216,14 +216,14 @@ const extractMerchant = (text: string): string => {
   return lines[0];
 };
 
-const extractInvoiceNumber = (text: string): string => {
+const extractInvoiceNumber = (text) => {
   const invoiceRegex =
     /(?:INV|INVOICE|BILL|TXN|TRANSACTION|RECEIPT|REF)s*(?:NO|ID|NUMBER)?s*[:#=]?s*([A-Z0-9/-]{4,})/i;
   const match = text.match(invoiceRegex);
   return match ? match[1] : '';
 };
 
-const extractPaymentMethod = (text: string): string => {
+const extractPaymentMethod = (text) => {
   const lowercaseText = text.toLowerCase();
   if (
     lowercaseText.includes('upi') ||
