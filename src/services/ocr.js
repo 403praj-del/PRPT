@@ -36,14 +36,19 @@ export const analyzeImage = async (imageSrc) => {
     } catch (error) {
         console.error("ML Kit OCR Error:", error);
 
-        // Strategic error messages
-        if (error.message?.includes('permission')) {
-            throw new Error("Storage/Camera permission not granted. Please allow access in settings.");
+        const msg = error.message || "";
+
+        if (msg.includes('permission') || msg.includes('access')) {
+            throw new Error("Permission Denied: App cannot access files or camera. Please check your settings.");
         }
-        if (error.message?.includes('No text detected')) {
-            throw error;
+        if (msg.includes('No text detected')) {
+            throw new Error("Image Unreadable: No text found. Please ensure the receipt is flat, well-lit, and the text is not blurry.");
         }
-        throw new Error("Failed to process image. Ensure it's a valid receipt or invoice.");
+        if (msg.includes('base64')) {
+            throw new Error("Ingestion Error: The image data was corrupted. Please try capturing it again.");
+        }
+
+        throw new Error("Processing Error: ML Kit failed to analyze this image. Try taking a photo from a different angle.");
     }
 };
 
