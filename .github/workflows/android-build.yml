@@ -48,9 +48,11 @@ jobs:
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
-          
-      - name: Upload APK Artifact
+          env:
+          JAVA_HOME: ${{ env.JAVA_HOME_21_X64 }}
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: payment-tracker-full-version
-          path: android/app/build/outputs/apk/debug/app-debug.apk    
+          name: app-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
