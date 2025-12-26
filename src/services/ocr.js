@@ -1,55 +1,52 @@
 import { Ocr } from '@capacitor-community/image-to-text';
 
 /**
- * Stable OCR + Receipt Parsing using ML Kit
- * @param {string} imageSrc - MUST be a valid native file path (file://...)
+ * OCR + field extraction.
+ * imageSrc:
+ *   - native file path (CameraResultType.Uri -> photo.path)
+ *   - OR data URL (from PDF canvas / web).
  */
-export const analyzeImage = async (imageSrc) => {
+export const analyzeImage = async (imageSrc: string) => {
   if (!imageSrc) {
-    throw new Error('prepare_failed');
-  }
-
-  // 1. Safety Check: Prevent passing PDF or invalid paths to ML Kit
-  if (imageSrc.endsWith('.pdf')) {
-    console.error('[OCR] PDF files are not supported by ML Kit image processing.');
-    throw new Error('invalid_file_type'); 
+    throw new Error('Unable to prepare image for analysis (source empty).');
   }
 
   try {
-    console.log('[OCR] Starting analysis with source:', imageSrc);
+    console.log('OCR starting...');
 
-    // 2. Normalize path: Ensure it looks like a file path if it isn't already
-    // (Some Android versions behave better if 'file://' is explicitly present)
-    const finalPath = imageSrc.startsWith('/') ? `file://${imageSrc}` : imageSrc;
+    let options: any;
 
-    const options = {
-      filename: finalPath,
-    };
-
-    const result = await Ocr.detectText(options);
-    const textDetections = result?.textDetections || [];
-
-    // Combine detected text safely
-    const fullText = textDetections
-      .map((d) => d.text)
-      .join('\n')
-      .trim();
-
-    console.log('[OCR] Extracted text length:', fullText.length);
-
-    // 3. Handle weak/empty text gracefully
-    if (!fullText) {
-      console.warn('[OCR] Text detection returned empty string.');
-      return createEmptyReceipt();
+    if (imageSrc.startsWith('data:')) {
+      const base64 = imageSrc.split(',')[1];
+      if (!base64 || base64.length < 100) {
+        throw new Error(
+          'Unable to prepare image for analysis (corrupted data).',
+        );
+      }
+      options = { base64 };
+    } else {
+      // Plugin’s recommended usage is filename only.[web:5]
+      options = { filename: imageSrc };
     }
 
-    // 4. Run Extraction Logic
+    const { textDetections } = await Ocr.detectText(options);
+
+    if (!textDetections || textDetections.length === 0) {
+      throw new Error(
+        'No readable text detected. Ensure the image is focused and contains text.',
+      );
+    }
+
+    const fullText = textDetections.map((d: any) => d.text).join('
+');
+    console.log('ML Kit Processed Text:', fullText);
+
     const amount = extractAmount(fullText);
     const merchant = extractMerchant(fullText);
-    const date = extractDate(fullText) || new Date().toISOString().split('T')[0];
-    
-    // Determine if we actually found useful data
-    const hasFields = Boolean(amount || merchant);
+    const dateResult = extractDate(fullText);
+    const date = dateResult || new Date().toISOString().split('T')[0];
+
+    const isLikelyReceipt = !!(amount || merchant);
 
     return {
       text: fullText,
@@ -59,129 +56,188 @@ export const analyzeImage = async (imageSrc) => {
       category: extractCategory(fullText),
       invoice_number: extractInvoiceNumber(fullText),
       payment_method: extractPaymentMethod(fullText),
-      hasFields
+      hasFields: isLikelyReceipt,
     };
+  } catch (error: any) {
+    console.error('ML Kit OCR Error:', error);
 
-  } catch (err) {
-    console.error('[OCR] Native OCR error:', err);
-    
-    // Standardize error messages for the UI
-    const msg = err?.message?.toLowerCase() || '';
+    const msg: string = error?.message || '';
 
-    if (msg.includes('file not found') || msg.includes('no such file')) {
-        throw new Error('file_not_found');
-    }
-    if (msg.includes('permission')) {
-      throw new Error('permission');
-    }
-    if (msg.includes('prepare')) {
-      throw new Error('prepare_failed');
+    if (msg.includes('permission') || msg.includes('access')) {
+      throw new Error(
+        'Permission required to read file. Please check settings.',
+      );
     }
 
-    throw new Error('ocr_failed');
+    if (msg.includes('No readable text') || msg.includes('prepare')) {
+      throw error;
+    }
+
+    throw new Error(
+      'ML Kit failed to analyze this image. Try taking a photo from a different angle.',
+    );
   }
 };
 
-/**
- * Helper to return a blank receipt object
- */
-const createEmptyReceipt = () => ({
-  text: '',
-  amount: '',
-  merchant: '',
-  date: new Date().toISOString().split('T')[0],
-  category: 'Other',
-  invoice_number: '',
-  payment_method: 'UPI',
-  hasFields: false
-});
+// -------- Extraction helpers --------
 
-/* -------------------- EXTRACTION HELPERS -------------------- */
-
-const extractAmount = (text) => {
-  // Enhanced regex to catch "Total 1,200.00" or "Amount: 500"
-  const amountRegex = /(?:RS|INR|₹|TOTAL|AMOUNT|AMT|NET|PAYABLE)\s*[:=.]?\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))/gi;
-
+const extractAmount = (text: string): string => {
+  const amountRegex =
+    /(?:RS|INR|₹|TOTAL|AMOUNT|AMT)s*[:=]?s*(d{1,3}(?:[.,]d{3})*(?:[.,]d{2}))/gi;
   const matches = [...text.matchAll(amountRegex)];
+
   if (matches.length > 0) {
-    // Return the last match found (usually the "Total" at the bottom)
-    return matches[matches.length - 1][1].replace(/,/g, '');
+    const lastMatch = matches[matches.length - 1][1];
+    return lastMatch.replace(/,/g, '');
   }
 
-  // Fallback: Find the largest number that looks like a price
-  const priceRegex = /\b\d{1,5}[.,]\d{2}\b/g;
+  const priceRegex = /\bd{1,5}[.,]d{2}\b/g;
   const prices = text.match(priceRegex);
-  if (!prices) return '';
-
-  return prices
-    .map(p => p.replace(/,/g, ''))
-    .sort((a, b) => parseFloat(b) - parseFloat(a))[0];
-};
-
-const extractDate = (text) => {
-  // Matches DD/MM/YYYY, YYYY-MM-DD, etc.
-  const dateRegex = /(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})|(\d{4})[/-](\d{1,2})[/-](\d{1,2})/;
-
-  const match = text.match(dateRegex);
-  if (!match) return null;
-
-  let y, m, d;
-  if (match[1]) {
-    // Format: DD-MM-YYYY
-    d = match[1].padStart(2, '0');
-    m = match[2].padStart(2, '0');
-    y = match[3].length === 2 ? '20' + match[3] : match[3];
-  } else {
-    // Format: YYYY-MM-DD
-    y = match[4];
-    m = match[5].padStart(2, '0');
-    d = match[6].padStart(2, '0');
+  if (prices) {
+    return prices
+      .reduce((max, curr) => {
+        const val = parseFloat(curr.replace(/,/g, ''));
+        return val > parseFloat(max.replace(/,/g, '')) ? curr : max;
+      })
+      .replace(/,/g, '');
   }
 
-  return `${y}-${m}-${d}`;
+  return '';
 };
 
-const extractCategory = (text) => {
-  const categories = {
-    FOOD: ['food', 'restaurant', 'cafe', 'swiggy', 'zomato', 'kitchen', 'tea', 'coffee'],
-    TRAVEL: ['uber', 'ola', 'taxi', 'bus', 'flight', 'rail', 'petrol', 'fuel'],
-    GROCERY: ['grocery', 'dmart', 'market', 'store', 'mart', 'fruit', 'vegetable'],
-    HOTEL: ['hotel', 'lodge', 'resort', 'stay'],
-    SHOPPING: ['cloth', 'apparel', 'mall', 'amazon', 'flipkart'],
-    MEDICAL: ['pharmacy', 'medical', 'hospital', 'clinic', 'doctor']
+const extractDate = (text: string): string | null => {
+  const dateRegex =
+    /(d{1,2})[/-](d{1,2})[/-](d{2,4})|(d{4})[/-](d{1,2})[/-](d{1,2})/;
+  const match = text.match(dateRegex);
+
+  if (match) {
+    let y: string, m: string, d: string;
+    if (match[1]) {
+      d = match[1].padStart(2, '0');
+      m = match[2].padStart(2, '0');
+      y = match[3];
+      if (y.length === 2) y = '20' + y;
+    } else {
+      y = match[4]!;
+      m = match[5]!.padStart(2, '0');
+      d = match[6]!.padStart(2, '0');
+    }
+    return `${y}-${m}-${d}`;
+  }
+  return null;
+};
+
+const extractCategory = (text: string): string => {
+  const categories: Record<string, string[]> = {
+    FOOD: [
+      'food',
+      'restaurant',
+      'cafe',
+      'swiggy',
+      'zomato',
+      'eat',
+      'lunch',
+      'dinner',
+      'burger',
+      'pizza',
+      'biryani',
+    ],
+    TRAVEL: [
+      'uber',
+      'ola',
+      'taxi',
+      'cab',
+      'metro',
+      'auto',
+      'train',
+      'flight',
+      'bus',
+      'fuel',
+      'petrol',
+      'diesel',
+    ],
+    GLOCERY: [
+      'grocery',
+      'dmart',
+      'market',
+      'milk',
+      'vegetables',
+      'kirana',
+      'mart',
+      'store',
+      'mandi',
+    ],
+    HOTEL: ['hotel', 'lodge', 'resort', 'stay', 'inn'],
+    'ROOM STAY': ['rent', 'pg', 'hostel', 'accommodation'],
   };
 
-  const t = text.toLowerCase();
-  for (const [cat, keys] of Object.entries(categories)) {
-    if (keys.some(k => t.includes(k))) return cat;
+  const lowercaseText = text.toLowerCase();
+  for (const [cat, keywords] of Object.entries(categories)) {
+    if (keywords.some((kw) => lowercaseText.includes(kw))) {
+      return cat;
+    }
   }
   return 'Other';
 };
 
-const extractMerchant = (text) => {
-  // Heuristic: The merchant name is usually the first non-empty line
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  // Skip lines that are just dates or "Receipt" headers if possible
-  const ignore = ['receipt', 'tax invoice', 'bill of supply', 'invoice'];
-  
+const extractMerchant = (text: string): string => {
+  const lines = text
+    .split('
+')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 2);
+  if (lines.length === 0) return '';
+
+  const commonMerchants = [
+    'GPay',
+    'PhonePe',
+    'Paytm',
+    'Amazon',
+    'Flipkart',
+    'Jio',
+    'Zomato',
+    'Swiggy',
+    'Uber',
+    'Ola',
+    'D-Mart',
+    'Reliance',
+  ];
   for (let i = 0; i < Math.min(lines.length, 3); i++) {
-     if (!ignore.some(ign => lines[i].toLowerCase().includes(ign))) {
-         return lines[i];
-     }
+    const line = lines[i];
+    if (
+      commonMerchants.some((m) =>
+        line.toLowerCase().includes(m.toLowerCase()),
+      )
+    ) {
+      return line;
+    }
   }
-  return lines[0] || '';
+
+  return lines[0];
 };
 
-const extractInvoiceNumber = (text) => {
-  const regex = /(?:INV|INVOICE|BILL|TXN|TRANSACTION|RECEIPT|REF)\s*(?:NO|ID)?\s*[:#=]?\s*([A-Z0-9/-]{4,})/i;
-  const match = text.match(regex);
+const extractInvoiceNumber = (text: string): string => {
+  const invoiceRegex =
+    /(?:INV|INVOICE|BILL|TXN|TRANSACTION|RECEIPT|REF)s*(?:NO|ID|NUMBER)?s*[:#=]?s*([A-Z0-9/-]{4,})/i;
+  const match = text.match(invoiceRegex);
   return match ? match[1] : '';
 };
 
-const extractPaymentMethod = (text) => {
-  const t = text.toLowerCase();
-  if (t.includes('cash')) return 'CASH';
-  if (t.includes('card') || t.includes('visa') || t.includes('mastercard')) return 'CARD';
+const extractPaymentMethod = (text: string): string => {
+  const lowercaseText = text.toLowerCase();
+  if (
+    lowercaseText.includes('upi') ||
+    lowercaseText.includes('gpay') ||
+    lowercaseText.includes('phonepe')
+  )
+    return 'UPI';
+  if (lowercaseText.includes('cash')) return 'CASH';
+  if (
+    lowercaseText.includes('card') ||
+    lowercaseText.includes('visa') ||
+    lowercaseText.includes('mastercard') ||
+    lowercaseText.includes('swipe')
+  )
+    return 'CARD';
   return 'UPI';
 };
-
