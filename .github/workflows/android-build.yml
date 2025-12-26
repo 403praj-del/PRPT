@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -38,13 +35,10 @@ jobs:
         run: npx cap sync
 
       - name: Build Android APK
-        run: |
-         cd android
-         chmod +x gradlew
-         ./gradlew assembleDebug
+        run: cd android && ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: payment-tracker-full-version
           path: android/app/build/outputs/apk/debug/app-debug.apk
