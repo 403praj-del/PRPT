@@ -1,0 +1,6 @@
+[
+	{
+		"pkg": "@capacitor-community/image-to-text",
+		"classpath": "com.capacitorcommunity.CapacitorOcr.CapacitorOcr"
+	}
+]
