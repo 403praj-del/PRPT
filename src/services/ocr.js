@@ -1,7 +1,7 @@
 import { Ocr } from '@capacitor-community/image-to-text';
 
 /**
- * OCR + field extraction.
+ * OCR + data extraction.
  * imageSrc:
  *   - native file path (CameraResultType.Uri -> photo.path/webPath)
  *   - OR data URL (from PDF canvas / web).
@@ -32,10 +32,18 @@ export const analyzeImage = async (imageSrc) => {
 
     const { textDetections } = await Ocr.detectText(options);
 
+    // No text → allow manual entry
     if (!textDetections || textDetections.length === 0) {
-      throw new Error(
-        'No readable text detected. Ensure the image is focused and contains text.',
-      );
+      return {
+        text: '',
+        amount: '',
+        merchant: '',
+        date: new Date().toISOString().split('T')[0],
+        category: 'Other',
+        invoice_number: '',
+        payment_method: 'UPI',
+        hasFields: false,
+      };
     }
 
     const fullText = textDetections.map((d) => d.text).join('
@@ -70,17 +78,13 @@ export const analyzeImage = async (imageSrc) => {
       );
     }
 
-    if (msg.includes('No readable text') || msg.includes('prepare')) {
+    if (msg.includes('corrupted data') || msg.includes('source empty')) {
       throw error;
     }
 
-    if (msg) {
-      // will show native error like "ocr_failed"
-      throw new Error(msg);
-    }
-
+    // For native codes like "ocr_failed", show friendly message
     throw new Error(
-      'ML Kit failed to analyze this image. Try taking a photo from a different angle.',
+      'OCR failed on this file. Try again with a clearer image or different file.',
     );
   }
 };
@@ -162,7 +166,7 @@ const extractCategory = (text) => {
       'petrol',
       'diesel',
     ],
-    GLOCERY: [
+    GROCERY: [
       'grocery',
       'dmart',
       'market',
@@ -208,12 +212,13 @@ const extractMerchant = (text) => {
     'D-Mart',
     'Reliance',
   ];
-  for (let i = 0; i < Math.min(lines.length, 3); i++) {
+
+  for (let i = 0; i < Math.min(lines.length, 5); i++) {
     const line = lines[i];
+    const lower = line.toLowerCase();
     if (
-      commonMerchants.some((m) =>
-        line.toLowerCase().includes(m.toLowerCase()),
-      )
+      commonMerchants.some((m) => lower.includes(m.toLowerCase())) &&
+      !/d{10}/.test(line)
     ) {
       return line;
     }
