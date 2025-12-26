@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { Camera } from '@capacitor/camera';
 import Layout from './components/Layout';
 import Dashboard from './components/Dashboard';
 import Capture from './components/Capture';
@@ -6,6 +7,21 @@ import Settings from './components/Settings';
 
 function App() {
   const [currentTab, setCurrentTab] = useState('home');
+
+  useEffect(() => {
+    // Attempt to pre-request permissions on first launch for a smoother experience
+    const initPermissions = async () => {
+      try {
+        const status = await Camera.checkPermissions();
+        if (status.camera !== 'granted' || status.photos !== 'granted') {
+          await Camera.requestPermissions({ permissions: ['camera', 'photos'] });
+        }
+      } catch (err) {
+        console.warn("Initial permission request skipped or failed:", err);
+      }
+    };
+    initPermissions();
+  }, []);
 
   const renderContent = () => {
     switch (currentTab) {
