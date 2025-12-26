@@ -10,14 +10,19 @@ import {
   FileText,
   Settings as SettingsIcon,
 } from 'lucide-react';
+
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { analyzeImage } from '../services/ocr';
 import { submitToGoogleForm } from '../services/api';
 import { FORM_CONFIG } from '../config/constants';
 
 export default function Capture({ onCancel }) {
-  const [step, setStep] = useState('select');
-  const [imagePreview, setImagePreview] = useState(null);
+  const [step, setStep] = useState('select'); // select | processing | form | success | error | format_warning
+  const [image, setImage] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [errorType, setErrorType] = useState(null);
+
   const [formData, setFormData] = useState({
     amount: '',
     category: FORM_CONFIG.categories[0],
@@ -26,83 +31,68 @@ export default function Capture({ onCancel }) {
     merchant: '',
     invoice_number: '',
   });
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
-  const [errorType, setErrorType] = useState('generic');
 
-  /* -------------------- PERMISSIONS -------------------- */
+  /* ---------------- PERMISSIONS ---------------- */
 
   const ensurePermission = async (type) => {
     try {
       const status = await Camera.checkPermissions();
       if (type === 'camera' && status.camera !== 'granted') {
-        const res = await Camera.requestPermissions({ permissions: ['camera'] });
-        if (res.camera !== 'granted') throw new Error('permission');
+        const r = await Camera.requestPermissions({ permissions: ['camera'] });
+        if (r.camera !== 'granted') throw new Error();
       }
       if (type === 'photos' && status.photos !== 'granted') {
-        const res = await Camera.requestPermissions({ permissions: ['photos'] });
-        if (res.photos !== 'granted') throw new Error('permission');
+        const r = await Camera.requestPermissions({ permissions: ['photos'] });
+        if (r.photos !== 'granted') throw new Error();
       }
       return true;
     } catch {
+      setErrorMsg('Permission required. Please enable camera/storage access.');
       setErrorType('permission');
-      setErrorMsg(
-        'Permission required. Please enable Camera / Storage permissions.',
-      );
       setStep('error');
       return false;
     }
   };
 
-  /* -------------------- OCR PIPELINE -------------------- */
+  /* ---------------- CORE PROCESSING ---------------- */
 
-  const startOCR = async (source, preview = null) => {
+  const startProcessing = async (uri) => {
+    setStep('processing');
+    setErrorMsg('');
+
     try {
-      setStep('processing');
-      setErrorMsg('');
+      // Preview directly from URI
+      setImage(uri);
 
-      if (preview) setImagePreview(preview);
+      // OCR only for IMAGE URI
+      const result = await analyzeImage(uri);
 
-      const result = await analyzeImage(source);
-
-      setFormData({
+      setFormData((prev) => ({
+        ...prev,
         amount: result.amount || '',
         category: result.category || FORM_CONFIG.categories[0],
         method: result.payment_method || FORM_CONFIG.paymentMethods[0],
-        date: result.date || new Date().toISOString().split('T')[0],
+        date: result.date || prev.date,
         merchant: result.merchant || '',
         invoice_number: result.invoice_number || '',
-      });
+      }));
 
-      setStep(result.hasFields ? 'form' : 'format_warning');
-    } catch (err) {
-      console.error('[OCR ERROR]', err);
-
-      const msg = err?.message || 'ocr_failed';
-
-      if (msg === 'permission') {
-        setErrorType('permission');
-        setErrorMsg(
-          'Permission denied. Please allow Camera / Storage access.',
-        );
-      } else if (msg === 'prepare_failed') {
-        setErrorType('prep');
-        setErrorMsg('Unable to prepare image for analysis.');
-      } else if (msg === 'ocr_failed') {
-        setErrorType('generic');
-        setErrorMsg('OCR failed. Please try a clearer image.');
+      if (!result.hasFields) {
+        setStep('format_warning');
       } else {
-        setErrorType('generic');
-        setErrorMsg(msg);
+        setStep('form');
       }
-
+    } catch (err) {
+      console.error(err);
+      setErrorMsg('Unable to analyze image. Please try another photo.');
+      setErrorType('generic');
       setStep('error');
     }
   };
 
-  /* -------------------- HANDLERS -------------------- */
+  /* ---------------- HANDLERS ---------------- */
 
-  const handleCamera = async () => {
+  const handleCameraCapture = async () => {
     if (!(await ensurePermission('camera'))) return;
 
     try {
@@ -112,18 +102,19 @@ export default function Capture({ onCancel }) {
         source: CameraSource.Camera,
       });
 
-      if (!photo.path || !photo.webPath)
-        throw new Error('prepare_failed');
+      if (!photo.webPath) {
+        throw new Error('No image URI');
+      }
 
-      await startOCR(photo.path, photo.webPath);
+      await startProcessing(photo.webPath);
     } catch {
-      setErrorType('prep');
-      setErrorMsg('Failed to capture image.');
+      setErrorMsg('Camera capture failed.');
+      setErrorType('generic');
       setStep('error');
     }
   };
 
-  const handleGallery = async () => {
+  const handleGalleryUpload = async () => {
     if (!(await ensurePermission('photos'))) return;
 
     try {
@@ -133,58 +124,36 @@ export default function Capture({ onCancel }) {
         source: CameraSource.Photos,
       });
 
-      if (!photo.path || !photo.webPath)
-        throw new Error('prepare_failed');
+      if (!photo.webPath) {
+        throw new Error('No image URI');
+      }
 
-      await startOCR(photo.path, photo.webPath);
+      await startProcessing(photo.webPath);
     } catch {
-      setErrorType('prep');
-      setErrorMsg('Failed to load image.');
+      setErrorMsg('Image selection failed.');
+      setErrorType('generic');
       setStep('error');
     }
   };
 
-  const handlePDF = async (e) => {
+  const handlePDFUploadChange = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    try {
-      setStep('processing');
-
-      const pdfjs = await import('pdfjs-dist');
-      pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
-
-      const buffer = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ data: buffer }).promise;
-      const page = await pdf.getPage(1);
-
-      const viewport = page.getViewport({ scale: 2.5 });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-
-      await page.render({
-        canvasContext: canvas.getContext('2d'),
-        viewport,
-      }).promise;
-
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
-      await startOCR(dataUrl, dataUrl);
-    } catch {
-      setErrorType('generic');
-      setErrorMsg('PDF not supported or corrupted.');
-      setStep('error');
-    }
+    // 🚫 NO OCR FOR PDF (safe manual flow)
+    const url = URL.createObjectURL(file);
+    setImage(url);
+    setStep('form');
   };
-
-  /* -------------------- SUBMIT -------------------- */
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setIsSubmitting(true);
-    const ok = await submitToGoogleForm(formData);
+
+    const success = await submitToGoogleForm(formData);
     setIsSubmitting(false);
-    if (ok) {
+
+    if (success) {
       setStep('success');
       setTimeout(onCancel, 1500);
     } else {
@@ -192,34 +161,26 @@ export default function Capture({ onCancel }) {
     }
   };
 
-  /* -------------------- UI STATES -------------------- */
+  /* ---------------- UI ---------------- */
 
   if (step === 'select') {
     return (
-      <div className="h-full flex flex-col bg-surface">
-        <Header onCancel={onCancel} title="Add Payment" />
+      <div className="h-full flex flex-col p-6 gap-6">
+        <Header title="Add Payment" onCancel={onCancel} />
 
-        <div className="flex-1 p-6 space-y-6">
-          <button onClick={handleCamera} className="scan-btn">
-            <CameraIcon size={32} />
-            Scan Receipt
+        <button onClick={handleCameraCapture} className="h-48 border-4 border-dashed rounded-3xl">
+          <CameraIcon size={32} /> Scan Receipt
+        </button>
+
+        <div className="grid grid-cols-2 gap-4">
+          <button onClick={handleGalleryUpload}>
+            <Upload /> Photos
           </button>
 
-          <div className="grid grid-cols-2 gap-4">
-            <button onClick={handleGallery} className="upload-btn">
-              <Upload size={24} /> Photos
-            </button>
-
-            <label className="upload-btn">
-              <FileText size={24} /> PDF
-              <input
-                type="file"
-                accept="application/pdf"
-                hidden
-                onChange={handlePDF}
-              />
-            </label>
-          </div>
+          <label>
+            <FileText /> PDF
+            <input type="file" accept="application/pdf" hidden onChange={handlePDFUploadChange} />
+          </label>
         </div>
       </div>
     );
@@ -227,106 +188,70 @@ export default function Capture({ onCancel }) {
 
   if (step === 'processing') {
     return (
-      <Center>
-        <Loader2 className="animate-spin" size={48} />
-        <p>Analyzing…</p>
-      </Center>
-    );
-  }
-
-  if (step === 'format_warning') {
-    return (
-      <Center>
-        <AlertCircle size={48} />
-        <p>Text detected but format not recognized.</p>
-        <button onClick={() => setStep('form')}>Fill Manually</button>
-      </Center>
+      <div className="h-full flex items-center justify-center">
+        <Loader2 size={48} className="animate-spin" />
+      </div>
     );
   }
 
   if (step === 'error') {
     return (
-      <Center>
-        <AlertCircle size={48} />
-        <h3>OCR Error</h3>
+      <div className="h-full flex flex-col items-center justify-center text-center gap-4">
+        <AlertCircle size={40} />
         <p>{errorMsg}</p>
-
-        {errorType === 'permission' && (
-          <button onClick={() => alert('Enable permissions in App Settings')}>
-            <SettingsIcon size={18} /> Open Settings
-          </button>
-        )}
-
         <button onClick={() => setStep('select')}>Try Again</button>
-      </Center>
+      </div>
     );
   }
 
   if (step === 'success') {
     return (
-      <Center>
+      <div className="h-full flex flex-col items-center justify-center">
         <Check size={48} />
-        <h2>Recorded!</h2>
-      </Center>
+        <p>Saved successfully</p>
+      </div>
     );
   }
 
-  /* -------------------- FORM -------------------- */
+  /* ---------------- FORM ---------------- */
 
   return (
-    <div className="h-full flex flex-col bg-surface">
-      <Header onCancel={onCancel} title="Confirm Expense" />
+    <form onSubmit={handleSubmit} className="p-6 space-y-4">
+      {image && <img src={image} className="h-40 object-cover rounded-xl" />}
 
-      <div className="flex-1 p-6 space-y-6">
-        {imagePreview && (
-          <img
-            src={imagePreview}
-            className="h-48 w-full object-cover rounded"
-            alt="preview"
-          />
-        )}
+      <input
+        placeholder="Amount"
+        value={formData.amount}
+        onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+        required
+      />
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <input
-            value={formData.amount}
-            onChange={(e) =>
-              setFormData({ ...formData, amount: e.target.value })
-            }
-            placeholder="Amount"
-            required
-          />
+      <input
+        placeholder="Merchant"
+        value={formData.merchant}
+        onChange={(e) => setFormData({ ...formData, merchant: e.target.value })}
+      />
 
-          <input
-            value={formData.merchant}
-            onChange={(e) =>
-              setFormData({ ...formData, merchant: e.target.value })
-            }
-            placeholder="Merchant"
-          />
+      <input
+        type="date"
+        value={formData.date}
+        onChange={(e) => setFormData({ ...formData, date: e.target.value })}
+      />
 
-          <button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? <Loader2 className="animate-spin" /> : 'Save'}
-            <Sparkles size={16} />
-          </button>
-        </form>
-      </div>
-    </div>
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? 'Saving…' : 'Save'}
+      </button>
+    </form>
   );
 }
 
-/* -------------------- HELPERS -------------------- */
+/* ---------------- HEADER ---------------- */
 
 const Header = ({ title, onCancel }) => (
-  <div className="p-4 flex justify-between border-b">
+  <div className="flex justify-between items-center mb-4">
     <h2>{title}</h2>
     <button onClick={onCancel}>
       <X />
     </button>
-  </div>
-);
-
-const Center = ({ children }) => (
-  <div className="h-full flex flex-col items-center justify-center gap-4 text-center p-6">
-    {children}
   </div>
 );
