@@ -6,7 +6,7 @@ import { submitToGoogleForm } from '../services/api';
 import { FORM_CONFIG } from '../config/constants';
 
 export default function Capture({ onCancel }) {
-    const [step, setStep] = useState('select'); // select, processing, form, success, error
+    const [step, setStep] = useState('select'); // select, processing, form, success, error, format_warning
     const [image, setImage] = useState(null);
     const [formData, setFormData] = useState({
         amount: '',
@@ -19,53 +19,82 @@ export default function Capture({ onCancel }) {
     const [analysisData, setAnalysisData] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMsg, setErrorMsg] = useState('');
-    const [errorType, setErrorType] = useState(null); // 'permission', 'generic', 'unreadable'
+    const [errorType, setErrorType] = useState(null); // 'permission', 'generic', 'prep'
 
     // --- Helpers ---
+
+    /**
+     * Normalizes image for OCR: Resizes to 1280px max, ensures ARGB, and fixes contrast/brightness.
+     */
+    const normalizeImage = (base64) => {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+
+                // 1. Calculate Resize (Max 1280px)
+                const MAX_WIDTH = 1280;
+                let width = img.width;
+                let height = img.height;
+
+                if (width > MAX_WIDTH) {
+                    height *= MAX_WIDTH / width;
+                    width = MAX_WIDTH;
+                }
+
+                canvas.width = width;
+                canvas.height = height;
+
+                // 2. Draw & ARGB Conversion
+                ctx.drawImage(img, 0, 0, width, height);
+
+                // 3. Image Enhancement: Contrast (+15%) and Brightness (+10%)
+                // We use CSS filter string for simpler processing
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = width;
+                tempCanvas.height = height;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.filter = 'brightness(1.1) contrast(1.15)';
+                tempCtx.drawImage(canvas, 0, 0);
+
+                resolve(tempCanvas.toDataURL('image/jpeg', 0.85));
+            };
+            img.onerror = () => resolve(base64); // Fallback to raw if fail
+            img.src = base64;
+        });
+    };
 
     const checkAndRequestPermissions = async (type = 'camera') => {
         try {
             const status = await Camera.checkPermissions();
-            console.log(`Permission status for ${type}:`, status);
-
-            if (type === 'camera') {
-                if (status.camera !== 'granted') {
-                    const request = await Camera.requestPermissions({ permissions: ['camera'] });
-                    if (request.camera !== 'granted') throw new Error('permission');
-                }
-            } else if (type === 'photos') {
-                if (status.photos !== 'granted') {
-                    const request = await Camera.requestPermissions({ permissions: ['photos'] });
-                    if (request.photos !== 'granted') throw new Error('permission');
-                }
+            if (type === 'camera' && status.camera !== 'granted') {
+                const req = await Camera.requestPermissions({ permissions: ['camera'] });
+                if (req.camera !== 'granted') throw new Error('permission');
+            } else if (type === 'photos' && status.photos !== 'granted') {
+                const req = await Camera.requestPermissions({ permissions: ['photos'] });
+                if (req.photos !== 'granted') throw new Error('permission');
             }
             return true;
         } catch (err) {
-            console.error("Permission check/request failed:", err);
-            setErrorMsg("Missing Permissions! The app cannot read images or access the camera. Please enable access in settings.");
+            setErrorMsg("Permission Required: The app cannot access the camera or files. Please enable access in settings.");
             setErrorType('permission');
             setStep('error');
             return false;
         }
     };
 
-    const startProcessing = async (imgSrc) => {
-        if (!imgSrc) {
-            setErrorMsg("No image data found. Please try again.");
-            setStep('error');
-            return;
-        }
-
+    const startProcessing = async (rawImg) => {
         setStep('processing');
         setErrorMsg('');
         try {
-            const result = await analyzeImage(imgSrc);
+            // Normalize before OCR
+            const normalizedImg = await normalizeImage(rawImg);
+            setImage(normalizedImg);
 
-            if (!result || (!result.amount && !result.merchant && !result.text)) {
-                throw new Error("OCR returned no usable text. Ensure you're scanning a clear, well-lit receipt.");
-            }
-
+            const result = await analyzeImage(normalizedImg);
             setAnalysisData(result);
+
             setFormData(prev => ({
                 ...prev,
                 amount: result.amount || "",
@@ -75,11 +104,17 @@ export default function Capture({ onCancel }) {
                 merchant: result.merchant || "",
                 invoice_number: result.invoice_number || ""
             }));
-            setStep('form');
+
+            // If text found but no fields matched, show warning but allow manual entry
+            if (!result.hasFields) {
+                setStep('format_warning');
+            } else {
+                setStep('form');
+            }
         } catch (err) {
             console.error("Processing error:", err);
             setErrorMsg(err.message || "Failed to analyze image.");
-            setErrorType('generic');
+            setErrorType(err.message.includes('prepare') ? 'prep' : 'generic');
             setStep('error');
         }
     };
@@ -87,52 +122,34 @@ export default function Capture({ onCancel }) {
     // --- Handlers ---
 
     const handleCameraCapture = async () => {
-        const hasPermission = await checkAndRequestPermissions('camera');
-        if (!hasPermission) return;
-
+        if (!await checkAndRequestPermissions('camera')) return;
         try {
             const photo = await Camera.getPhoto({
-                quality: 60, // Lower quality for faster processing and less memory
-                allowEditing: false,
+                quality: 90,
                 resultType: CameraResultType.Base64,
                 source: CameraSource.Camera
             });
-
-            if (!photo.base64String) throw new Error("unreadable");
-
-            const base64Image = `data:image/${photo.format};base64,${photo.base64String}`;
-            setImage(base64Image);
-            startProcessing(base64Image);
+            startProcessing(`data:image/${photo.format};base64,${photo.base64String}`);
         } catch (err) {
             if (err.message !== 'User cancelled photos app') {
-                console.error("Camera capture failed:", err);
-                setErrorMsg(err.message === 'unreadable' ? "Captured image is unreadable." : "Could not use camera.");
+                setErrorMsg("Unable to prepare image for analysis.");
                 setStep('error');
             }
         }
     };
 
     const handleGalleryUpload = async () => {
-        const hasPermission = await checkAndRequestPermissions('photos');
-        if (!hasPermission) return;
-
+        if (!await checkAndRequestPermissions('photos')) return;
         try {
             const photo = await Camera.getPhoto({
-                quality: 60,
-                allowEditing: false,
+                quality: 90,
                 resultType: CameraResultType.Base64,
                 source: CameraSource.Photos
             });
-
-            if (!photo.base64String) throw new Error("unreadable");
-
-            const base64Image = `data:image/${photo.format};base64,${photo.base64String}`;
-            setImage(base64Image);
-            startProcessing(base64Image);
+            startProcessing(`data:image/${photo.format};base64,${photo.base64String}`);
         } catch (err) {
             if (err.message !== 'User cancelled photos app') {
-                console.error("Gallery selection failed:", err);
-                setErrorMsg(err.message === 'unreadable' ? "Selected image is empty or invalid." : "Could not read image from gallery.");
+                setErrorMsg("Unable to prepare image for analysis.");
                 setStep('error');
             }
         }
@@ -143,38 +160,25 @@ export default function Capture({ onCancel }) {
         if (!file) return;
 
         setStep('processing');
-        setErrorMsg('');
         try {
-            // Check for potential corruption
-            if (file.size === 0) throw new Error("Empty file selected.");
-
-            // Use pdfjs to render first page
             const pdfjs = await import('pdfjs-dist');
             pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
             const arrayBuffer = await file.arrayBuffer();
             const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-
-            if (pdf.numPages === 0) throw new Error("This PDF contains no pages.");
-
             const page = await pdf.getPage(1);
-            const viewport = page.getViewport({ scale: 1.5 }); // Balanced scale for quality vs memory
 
+            // Higher Scale for Sharpness (2.5x)
+            const viewport = page.getViewport({ scale: 2.5 });
             const canvas = document.createElement('canvas');
             const context = canvas.getContext('2d');
             canvas.height = viewport.height;
             canvas.width = viewport.width;
 
             await page.render({ canvasContext: context, viewport }).promise;
-            const imageSrc = canvas.toDataURL('image/jpeg', 0.8);
-
-            if (!imageSrc || imageSrc.length < 100) throw new Error("Failed to render PDF page.");
-
-            setImage(imageSrc);
-            startProcessing(imageSrc);
+            startProcessing(canvas.toDataURL('image/jpeg', 0.9));
         } catch (err) {
-            console.error("PDF Processing Error:", err);
-            setErrorMsg(err.message?.includes('render') ? "PDF Rendering failed. Try taking a screenshot instead." : "Could not read PDF file. It may be password protected or corrupted.");
+            setErrorMsg("PDF not supported or corrupted.");
             setStep('error');
         }
     };
@@ -186,9 +190,9 @@ export default function Capture({ onCancel }) {
         setIsSubmitting(false);
         if (success) {
             setStep('success');
-            setTimeout(() => onCancel(), 2000);
+            setTimeout(() => onCancel(), 1500);
         } else {
-            alert("Connection error! Could not submit to Google Form. Please check your internet.");
+            alert("Submission error! Check internet.");
         }
     };
 
@@ -215,22 +219,17 @@ export default function Capture({ onCancel }) {
                     <div className="grid grid-cols-2 gap-4 w-full">
                         <button
                             onClick={handleGalleryUpload}
-                            className="h-36 rounded-2xl bg-surface border-2 border-dashed border-border flex flex-col items-center justify-center gap-2 hover:border-secondary hover:bg-secondary/5 transition-all"
+                            className="h-36 rounded-2xl bg-surface border-2 border-dashed border-border flex flex-col items-center justify-center gap-2"
                         >
                             <Upload size={24} className="text-secondary" />
-                            <span className="font-bold text-xs uppercase tracking-widest text-text">Photos</span>
+                            <span className="font-bold text-xs uppercase text-text">Photos</span>
                         </button>
 
                         <div className="relative">
-                            <input
-                                type="file"
-                                accept="application/pdf"
-                                className="absolute inset-0 opacity-0 cursor-pointer z-10"
-                                onChange={handlePDFUploadChange}
-                            />
-                            <button className="w-full h-36 rounded-2xl bg-surface border-2 border-dashed border-border flex flex-col items-center justify-center gap-2 hover:border-accent hover:bg-accent/5 transition-all">
+                            <input type="file" accept="application/pdf" className="absolute inset-0 opacity-0 cursor-pointer z-10" onChange={handlePDFUploadChange} />
+                            <button className="w-full h-36 rounded-2xl bg-surface border-2 border-dashed border-border flex flex-col items-center justify-center gap-2">
                                 <FileText size={24} className="text-accent" />
-                                <span className="font-bold text-xs uppercase tracking-widest text-text">PDF Document</span>
+                                <span className="font-bold text-xs uppercase text-text">PDF Document</span>
                             </button>
                         </div>
                     </div>
@@ -242,46 +241,51 @@ export default function Capture({ onCancel }) {
     if (step === 'processing') {
         return (
             <div className="h-full flex flex-col items-center justify-center bg-surface p-12 text-center space-y-6">
-                <div className="relative">
-                    <div className="absolute inset-0 bg-primary/20 blur-2xl rounded-full animate-pulse"></div>
-                    <div className="relative z-10 w-24 h-24 rounded-full border-4 border-primary/20 border-t-primary animate-spin"></div>
-                    <Sparkles size={32} className="absolute inset-0 m-auto text-primary animate-bounce-slow" />
-                </div>
+                <Loader2 size={48} className="text-primary animate-spin" />
                 <div>
-                    <h3 className="text-xl font-black">AI Analyzing...</h3>
-                    <p className="text-sm text-text-muted mt-2 animate-pulse">Extracting payment details locally</p>
+                    <h3 className="text-xl font-black">Normalizing Input...</h3>
+                    <p className="text-sm text-text-muted mt-2">Preparing high-res OCR scan</p>
                 </div>
+            </div>
+        );
+    }
+
+    if (step === 'format_warning') {
+        return (
+            <div className="h-full flex flex-col items-center justify-center bg-surface p-8 text-center space-y-6">
+                <div className="w-20 h-20 bg-amber-500/10 text-amber-500 rounded-full flex items-center justify-center">
+                    <AlertCircle size={40} />
+                </div>
+                <div className="space-y-2">
+                    <h3 className="text-2xl font-black text-amber-600">Format Unrecognized</h3>
+                    <p className="text-text-muted">Text detected, but receipt format not recognized. Please fill in details manually.</p>
+                </div>
+                <button
+                    onClick={() => setStep('form')}
+                    className="w-full bg-primary text-white font-black py-4 rounded-2xl shadow-xl shadow-primary/20 active:scale-95 transition-all text-xl"
+                >
+                    Fill Manually
+                </button>
+                <button onClick={() => setStep('select')} className="text-xs font-bold uppercase text-text-muted border-b border-border">Try Another Image</button>
             </div>
         );
     }
 
     if (step === 'error') {
         return (
-            <div className="h-full flex flex-col items-center justify-center bg-surface p-8 text-center space-y-6 animate-fade-in">
+            <div className="h-full flex flex-col items-center justify-center bg-surface p-8 text-center space-y-6">
                 <div className="w-20 h-20 bg-red-500/10 text-red-500 rounded-full flex items-center justify-center">
                     <AlertCircle size={40} />
                 </div>
-                <div className="space-y-2">
-                    <h3 className="text-2xl font-black">{errorType === 'permission' ? 'Permission Error' : 'Analysis Failed'}</h3>
-                    <p className="text-text-muted leading-relaxed">{errorMsg}</p>
-                </div>
-
-                <div className="w-full space-y-3 pt-4">
+                <h3 className="text-2xl font-black">{errorType === 'permission' ? 'Access Denied' : 'OCR Error'}</h3>
+                <p className="text-text-muted leading-relaxed">{errorMsg}</p>
+                <div className="w-full space-y-3">
                     {errorType === 'permission' && (
-                        <button
-                            onClick={() => alert("Please open Phone Settings > Apps > Payment Tracker > Permissions and enable Camera and Files/Media.")}
-                            className="w-full bg-primary text-white font-black py-4 rounded-2xl shadow-lg shadow-primary/20 flex items-center justify-center gap-2 active:scale-95"
-                        >
-                            <SettingsIcon size={20} />
-                            Check Permissions
+                        <button onClick={() => alert("Open App Info > Permissions > Allow Camera/Storage")} className="w-full bg-primary text-white font-black py-4 rounded-2xl flex items-center justify-center gap-2">
+                            <SettingsIcon size={20} /> Open Settings
                         </button>
                     )}
-                    <button
-                        onClick={() => setStep('select')}
-                        className="w-full bg-background border-2 border-border text-text font-bold py-4 rounded-2xl active:scale-95"
-                    >
-                        Try Another Way
-                    </button>
+                    <button onClick={() => setStep('select')} className="w-full bg-background border-2 border-border text-text font-bold py-4 rounded-2xl">Try Again</button>
                 </div>
             </div>
         );
@@ -290,134 +294,78 @@ export default function Capture({ onCancel }) {
     if (step === 'success') {
         return (
             <div className="h-full flex flex-col items-center justify-center bg-surface p-12 text-center space-y-4">
-                <div className="w-24 h-24 bg-secondary/20 text-secondary rounded-full flex items-center justify-center animate-bounce-short">
+                <div className="w-24 h-24 bg-secondary/20 text-secondary rounded-full flex items-center justify-center animate-bounce">
                     <Check size={48} />
                 </div>
-                <h2 className="text-3xl font-black tracking-tight">SUCCESS!</h2>
-                <p className="text-text-muted">Payment added to Google Sheet.</p>
+                <h2 className="text-3xl font-black">RECORDED!</h2>
+                <p className="text-text-muted">Data synced to Google Sheet.</p>
             </div>
         );
     }
 
-    // Default: Form Step
     return (
-        <div className="h-full flex flex-col bg-surface animate-slide-up overflow-hidden">
+        <div className="h-full flex flex-col bg-surface overflow-hidden">
             <Header onCancel={onCancel} title="Confirm Expense" />
-
             <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-28">
-                {analysisData && (
-                    <div className="bg-primary/10 border border-primary/20 rounded-2xl p-4 flex gap-4 animate-fade-in">
-                        <div className="w-12 h-12 bg-primary/20 text-primary rounded-xl flex items-center justify-center shrink-0">
-                            <Sparkles size={24} />
-                        </div>
-                        <div className="text-xs">
-                            <p className="font-black text-primary uppercase tracking-wider text-xs">AI Extraction Result</p>
-                            <p className="text-text-muted mt-1 leading-normal">
-                                Amount: <strong>₹{analysisData.amount || 'N/A'}</strong> • Date: <strong>{analysisData.date || 'Today'}</strong>
-                                <br />Merchant: <strong>{analysisData.merchant || 'Unknown'}</strong>
-                            </p>
-                        </div>
-                    </div>
-                )}
+                {image && <img src={image} className="h-48 w-full object-cover rounded-2xl border-2 border-border" alt="Scan" />}
 
-                <div className="space-y-6">
-                    {image && (
-                        <div className="h-56 w-full rounded-2xl overflow-hidden relative group border-2 border-border shadow-md">
-                            <img src={image} alt="Receipt" className="w-full h-full object-cover" />
-                            <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/60 to-transparent flex items-end p-4">
-                                <button
-                                    onClick={() => setStep('select')}
-                                    className="ml-auto p-2 bg-white/20 hover:bg-white/40 text-white rounded-full backdrop-blur-md active:scale-90 transition-all"
-                                >
-                                    <RefreshCw size={20} />
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    <form onSubmit={handleSubmit} className="space-y-5">
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Amount</label>
-                            <div className="relative">
-                                <span className="absolute left-5 top-1/2 -translate-y-1/2 text-3xl font-black text-text-muted">₹</span>
-                                <input
-                                    type="text"
-                                    value={formData.amount}
-                                    onChange={e => setFormData({ ...formData, amount: e.target.value })}
-                                    placeholder="0.00"
-                                    className="w-full bg-background border-2 border-border rounded-2xl pl-12 pr-4 py-5 text-4xl font-black focus:border-primary transition-all shadow-sm"
-                                    required
-                                />
-                            </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Category</label>
-                                <select
-                                    value={formData.category}
-                                    onChange={e => setFormData({ ...formData, category: e.target.value })}
-                                    className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase focus:border-primary transition-all appearance-none"
-                                >
-                                    {FORM_CONFIG.categories.map(c => <option key={c} value={c}>{c}</option>)}
-                                </select>
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Method</label>
-                                <select
-                                    value={formData.method}
-                                    onChange={e => setFormData({ ...formData, method: e.target.value })}
-                                    className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase focus:border-primary transition-all appearance-none"
-                                >
-                                    {FORM_CONFIG.paymentMethods.map(m => <option key={m} value={m}>{m}</option>)}
-                                </select>
-                            </div>
-                        </div>
-
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Merchant</label>
+                <form onSubmit={handleSubmit} className="space-y-5">
+                    <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Amount</label>
+                        <div className="relative">
+                            <span className="absolute left-5 top-1/2 -translate-y-1/2 text-3xl font-black text-text-muted">₹</span>
                             <input
                                 type="text"
-                                value={formData.merchant}
-                                onChange={e => setFormData({ ...formData, merchant: e.target.value })}
-                                placeholder="Where did you spend?"
-                                className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold focus:border-primary transition-all shadow-sm"
+                                value={formData.amount}
+                                onChange={e => setFormData({ ...formData, amount: e.target.value })}
+                                placeholder="0.00"
+                                className="w-full bg-background border-2 border-border rounded-2xl pl-12 pr-4 py-5 text-4xl font-black focus:border-primary transition-all shadow-sm"
+                                required
                             />
                         </div>
+                    </div>
 
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Date</label>
-                                <input
-                                    type="date"
-                                    value={formData.date}
-                                    onChange={e => setFormData({ ...formData, date: e.target.value })}
-                                    className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold text-sm focus:border-primary transition-all"
-                                />
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Ref #</label>
-                                <input
-                                    type="text"
-                                    value={formData.invoice_number}
-                                    onChange={e => setFormData({ ...formData, invoice_number: e.target.value })}
-                                    placeholder="Optional"
-                                    className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold text-sm focus:border-primary transition-all"
-                                />
-                            </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Category</label>
+                            <select value={formData.category} onChange={e => setFormData({ ...formData, category: e.target.value })} className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase appearance-none">
+                                {FORM_CONFIG.categories.map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
                         </div>
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Method</label>
+                            <select value={formData.method} onChange={e => setFormData({ ...formData, method: e.target.value })} className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase appearance-none">
+                                {FORM_CONFIG.paymentMethods.map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                        </div>
+                    </div>
 
-                        <div className="fixed bottom-0 left-0 right-0 p-6 bg-surface border-t border-border z-30">
-                            <button
-                                type="submit"
-                                disabled={isSubmitting}
-                                className="w-full bg-primary text-white font-black py-5 rounded-2xl shadow-2xl shadow-primary/40 flex items-center justify-center gap-3 active:scale-95 transition-all text-xl uppercase tracking-widest disabled:opacity-50"
-                            >
-                                {isSubmitting ? <Loader2 className="animate-spin" /> : <>Upload Entry <Sparkles size={20} /></>}
-                            </button>
+                    <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Merchant</label>
+                        <input type="text" value={formData.merchant} onChange={e => setFormData({ ...formData, merchant: e.target.value })} placeholder="Vendor Name" className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold shadow-sm" />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Date</label>
+                            <input type="date" value={formData.date} onChange={e => setFormData({ ...formData, date: e.target.value })} className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold text-sm" />
                         </div>
-                    </form>
-                </div>
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-black text-text-muted uppercase tracking-[0.2em] ml-1">Ref #</label>
+                            <input type="text" value={formData.invoice_number} onChange={e => setFormData({ ...formData, invoice_number: e.target.value })} placeholder="Bill ID" className="w-full bg-background border-2 border-border rounded-2xl p-4 font-bold text-sm" />
+                        </div>
+                    </div>
+
+                    <div className="fixed bottom-0 left-0 right-0 p-6 bg-surface border-t border-border z-30">
+                        <button
+                            type="submit"
+                            disabled={isSubmitting}
+                            className="w-full bg-primary text-white font-black py-5 rounded-2xl shadow-primary/40 flex items-center justify-center gap-3 active:scale-95 transition-all text-xl uppercase tracking-widest"
+                        >
+                            {isSubmitting ? <Loader2 className="animate-spin" /> : <>Finalize Entry <Sparkles size={20} /></>}
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
     );
