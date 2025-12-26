@@ -15,21 +15,9 @@ import { analyzeImage } from '../services/ocr';
 import { submitToGoogleForm } from '../services/api';
 import { FORM_CONFIG } from '../config/constants';
 
-type Step =
-  | 'select'
-  | 'processing'
-  | 'form'
-  | 'success'
-  | 'error'
-  | 'format_warning';
-
-interface CaptureProps {
-  onCancel: () => void;
-}
-
-export default function Capture({ onCancel }: CaptureProps) {
-  const [step, setStep] = useState<Step>('select');
-  const [image, setImage] = useState<string | null>(null);
+export default function Capture({ onCancel }) {
+  const [step, setStep] = useState('select'); // select, processing, form, success, error, format_warning
+  const [image, setImage] = useState(null);
   const [formData, setFormData] = useState({
     amount: '',
     category: FORM_CONFIG.categories[0],
@@ -38,20 +26,19 @@ export default function Capture({ onCancel }: CaptureProps) {
     merchant: '',
     invoice_number: '',
   });
-  const [analysisData, setAnalysisData] = useState<any>(null);
+  const [analysisData, setAnalysisData] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [errorType, setErrorType] = useState<'permission' | 'generic' | 'prep' | null>(null);
+  const [errorType, setErrorType] = useState(null); // 'permission', 'generic', 'prep'
 
   // -------- Helpers --------
 
-  // Only used for data URLs (PDF / web preview).
-  const normalizeImage = (base64: string): Promise<string> => {
+  const normalizeImage = (base64) => {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d')!;
+        const ctx = canvas.getContext('2d');
 
         const MAX_WIDTH = 1280;
         let width = img.width;
@@ -69,7 +56,7 @@ export default function Capture({ onCancel }: CaptureProps) {
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = width;
         tempCanvas.height = height;
-        const tempCtx = tempCanvas.getContext('2d')!;
+        const tempCtx = tempCanvas.getContext('2d');
         tempCtx.filter = 'brightness(1.1) contrast(1.15)';
         tempCtx.drawImage(canvas, 0, 0);
 
@@ -80,7 +67,7 @@ export default function Capture({ onCancel }: CaptureProps) {
     });
   };
 
-  const checkAndRequestPermissions = async (type: 'camera' | 'photos') => {
+  const checkAndRequestPermissions = async (type) => {
     try {
       const status = await Camera.checkPermissions();
       if (type === 'camera' && status.camera !== 'granted') {
@@ -91,7 +78,7 @@ export default function Capture({ onCancel }: CaptureProps) {
         if (req.photos !== 'granted') throw new Error('permission');
       }
       return true;
-    } catch {
+    } catch (err) {
       setErrorMsg(
         'Permission Required: The app cannot access the camera or files. Please enable access in settings.',
       );
@@ -101,13 +88,12 @@ export default function Capture({ onCancel }: CaptureProps) {
     }
   };
 
-  const startProcessing = async (src: string) => {
+  const startProcessing = async (src) => {
     setStep('processing');
     setErrorMsg('');
     try {
       let preview = src;
 
-      // For native file paths we can’t preview directly; for data URLs normalize.
       if (src.startsWith('data:')) {
         preview = await normalizeImage(src);
       }
@@ -132,9 +118,9 @@ export default function Capture({ onCancel }: CaptureProps) {
       } else {
         setStep('form');
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Processing error:', err);
-      const msg = err?.message || 'Failed to analyze image.';
+      const msg = err.message || 'Failed to analyze image.';
       setErrorMsg(msg);
       setErrorType(msg.includes('prepare') ? 'prep' : 'generic');
       setStep('error');
@@ -158,8 +144,8 @@ export default function Capture({ onCancel }: CaptureProps) {
       }
 
       await startProcessing(photo.path);
-    } catch (err: any) {
-      if (err?.message !== 'User cancelled photos app') {
+    } catch (err) {
+      if (err.message !== 'User cancelled photos app') {
         setErrorMsg('Unable to prepare image for analysis.');
         setErrorType('generic');
         setStep('error');
@@ -182,8 +168,8 @@ export default function Capture({ onCancel }: CaptureProps) {
       }
 
       await startProcessing(photo.path);
-    } catch (err: any) {
-      if (err?.message !== 'User cancelled photos app') {
+    } catch (err) {
+      if (err.message !== 'User cancelled photos app') {
         setErrorMsg('Unable to prepare image for analysis.');
         setErrorType('generic');
         setStep('error');
@@ -191,9 +177,7 @@ export default function Capture({ onCancel }: CaptureProps) {
     }
   };
 
-  const handlePDFUploadChange = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
+  const handlePDFUploadChange = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -209,7 +193,7 @@ export default function Capture({ onCancel }: CaptureProps) {
 
       const viewport = page.getViewport({ scale: 2.5 });
       const canvas = document.createElement('canvas');
-      const context = canvas.getContext('2d')!;
+      const context = canvas.getContext('2d');
       canvas.height = viewport.height;
       canvas.width = viewport.width;
 
@@ -225,7 +209,7 @@ export default function Capture({ onCancel }: CaptureProps) {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setIsSubmitting(true);
     const success = await submitToGoogleForm(formData);
@@ -429,7 +413,7 @@ export default function Capture({ onCancel }: CaptureProps) {
                 }
                 className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase appearance-none"
               >
-                {FORM_CONFIG.categories.map((c: string) => (
+                {FORM_CONFIG.categories.map((c) => (
                   <option key={c} value={c}>
                     {c}
                   </option>
@@ -447,7 +431,7 @@ export default function Capture({ onCancel }: CaptureProps) {
                 }
                 className="w-full bg-background border-2 border-border rounded-2xl p-4 font-black text-sm uppercase appearance-none"
               >
-                {FORM_CONFIG.paymentMethods.map((m: string) => (
+                {FORM_CONFIG.paymentMethods.map((m) => (
                   <option key={m} value={m}>
                     {m}
                   </option>
@@ -525,12 +509,7 @@ export default function Capture({ onCancel }: CaptureProps) {
   );
 }
 
-interface HeaderProps {
-  onCancel: () => void;
-  title: string;
-}
-
-const Header = ({ onCancel, title }: HeaderProps) => (
+const Header = ({ onCancel, title }) => (
   <div className="p-5 flex justify-between items-center bg-surface border-b border-border sticky top-0 z-40">
     <h2 className="font-black text-2xl tracking-tight uppercase tracking-widest">
       {title}
