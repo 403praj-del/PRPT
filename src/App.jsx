@@ -9,19 +9,33 @@ function App() {
   const [currentTab, setCurrentTab] = useState('home');
 
   useEffect(() => {
-    // Attempt to pre-request permissions on first launch for a smoother experience
     const initPermissions = async () => {
       try {
+        // 1️⃣ Check existing permissions
         const status = await Camera.checkPermissions();
-        // Comprehensive check for Camera and Photos
-        if (status.camera !== 'granted' || status.photos !== 'granted') {
-          console.log("Requesting permissions on launch...");
-          await Camera.requestPermissions({ permissions: ['camera', 'photos'] });
+        console.log('[Permissions] Current:', status);
+
+        const needCamera =
+          status.camera !== 'granted';
+
+        const needPhotos =
+          status.photos !== 'granted' &&
+          status.photos !== 'limited'; // Android 13+ case
+
+        // 2️⃣ Request only if needed
+        if (needCamera || needPhotos) {
+          console.log('[Permissions] Requesting camera/photos...');
+          const result = await Camera.requestPermissions({
+            permissions: ['camera', 'photos'],
+          });
+          console.log('[Permissions] Result:', result);
         }
       } catch (err) {
-        console.warn("Initial permission request skipped or failed:", err);
+        // Do NOT block app on permission failure
+        console.warn('[Permissions] Init skipped:', err);
       }
     };
+
     initPermissions();
   }, []);
 
@@ -29,10 +43,13 @@ function App() {
     switch (currentTab) {
       case 'home':
         return <Dashboard onCapture={() => setCurrentTab('capture')} />;
+
       case 'capture':
         return <Capture onCancel={() => setCurrentTab('home')} />;
+
       case 'settings':
         return <Settings />;
+
       default:
         return <Dashboard onCapture={() => setCurrentTab('capture')} />;
     }
