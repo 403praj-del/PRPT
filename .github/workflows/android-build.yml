@@ -28,6 +28,12 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
+      - name: Debug Environment
+        run: |
+          java -version
+          gradle -v
+          echo "JAVA_HOME: $JAVA_HOME"
+
       - name: Install Dependencies
         run: npm install
 
@@ -36,11 +42,9 @@ jobs:
 
       - name: Sync Capacitor
         run: npx cap sync
-
+        
       - name: Build APK
         run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
